@@ -1,0 +1,17 @@
+{
+  "name": "leadtracker-pro",
+  "version": "1.0.0",
+  "description": "WhatsApp Lead Tracking Agent for Field Service Companies",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "dotenv": "^16.0.0",
+    "node-cron": "^3.0.0",
+    "axios": "^1.6.0",
+    "googleapis": "^140.0.0",
+    "better-sqlite3": "^9.4.0"
+  }
+}
