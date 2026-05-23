@@ -1,40 +1,47 @@
-const Database = require('better-sqlite3');
-const db = new Database('leadtracker.db');
+// In-memory database (resets on restart, but works without native dependencies)
+const data = {
+  groups: {},
+  leads: {},
+  locations: {},
+  nextId: 1
+};
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id TEXT UNIQUE NOT NULL,
-    tech_name TEXT NOT NULL,
-    commission_pct REAL NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS tech_locations (
-    tech_name TEXT PRIMARY KEY,
-    latitude REAL,
-    longitude REAL,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS leads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id TEXT NOT NULL,
-    tech_name TEXT NOT NULL,
-    message TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    confirmed_at DATETIME,
-    closed_at DATETIME,
-    sale_amount REAL DEFAULT 0,
-    cash_collected REAL DEFAULT 0,
-    parts_tech REAL DEFAULT 0,
-    parts_company REAL DEFAULT 0,
-    follow_up_1_sent INTEGER DEFAULT 0,
-    boss_alerted INTEGER DEFAULT 0,
-    progress_asked INTEGER DEFAULT 0,
-    scheduled_time TEXT,
-    cancel_reason TEXT
-  );
-`);
+const db = {
+  getGroup: (groupId) => data.groups[groupId] || null,
+  setGroup: (groupId, techName, commissionPct) => {
+    data.groups[groupId] = { group_id: groupId, tech_name: techName, commission_pct: commissionPct };
+  },
+  createLead: (groupId, techName, message) => {
+    const id = data.nextId++;
+    data.leads[id] = {
+      id, group_id: groupId, tech_name: techName, message,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      confirmed_at: null, closed_at: null,
+      sale_amount: 0, cash_collected: 0,
+      parts_tech: 0, parts_company: 0,
+      follow_up_1_sent: false, boss_alerted: false,
+      progress_asked: false, scheduled_time: null, cancel_reason: null
+    };
+    return id;
+  },
+  getLead: (id) => data.leads[id] || null,
+  updateLead: (id, updates) => {
+    if (data.leads[id]) data.leads[id] = { ...data.leads[id], ...updates };
+  },
+  getLatestLeadByStatus: (techName, ...statuses) => {
+    return Object.values(data.leads)
+      .filter(l => l.tech_name === techName && statuses.includes(l.status))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+  },
+  getLeadsByTechAndDate: (techName, date) => {
+    return Object.values(data.leads)
+      .filter(l => l.tech_name === techName && l.created_at.startsWith(date));
+  },
+  updateLocation: (techName, latitude, longitude) => {
+    data.locations[techName] = { tech_name: techName, latitude, longitude, updated_at: new Date().toISOString() };
+  },
+  getAllLocations: () => Object.values(data.locations),
+};
 
 module.exports = db;
