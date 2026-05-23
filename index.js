@@ -48,7 +48,7 @@ async function connectToWhatsApp() {
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-  console.log('\n📱 QR CODE BELOW - Scan with WhatsApp Business:\n');
+ console.log('\nQR CODE BELOW - Scan with WhatsApp Business:\n');
   qrcode.generate(qr, { small: false });
   console.log('\nQR STRING:', qr);
 }
