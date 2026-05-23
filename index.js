@@ -1,6 +1,5 @@
 require('dotenv').config();
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 const cron = require('node-cron');
 const express = require('express');
@@ -10,20 +9,23 @@ const { parseCloseMessage, formatCloseMessage } = require('./parts');
 const { scheduleLeadFollowups, scheduleProgressCheck, scheduleClosingReminder, scheduleAppointmentReminders, cancelTimers } = require('./scheduler');
 const { generateDailyReport } = require('./reports');
 
-const app = express();
 let currentQR = null;
+const app = express();
+
 app.get('/', (req, res) => res.send('LeadTracker Pro is running'));
 app.get('/qr', (req, res) => {
   if (currentQR) {
-    res.send('<html><body><h2>Scan this QR with WhatsApp Business</h2><img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(currentQR) + '"/></body></html>');
+    const url = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(currentQR);
+    res.send('<html><body style="text-align:center"><h2>Scan with WhatsApp Business</h2><img src="' + url + '"/><p>Refresh if expired</p></body></html>');
   } else {
-    res.send('No QR code available yet. Refresh in a few seconds.');
+    res.send('<html><body><h2>No QR yet - refresh in 10 seconds</h2></body></html>');
   }
 });
 app.get('/report', async (req, res) => {
   const report = await generateDailyReport();
   res.send(report);
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('HTTP server on port ' + PORT));
 
@@ -44,150 +46,128 @@ async function alertBoss(message) {
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  
-  sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-    logger: pino({ level: 'silent' })
-  });
-
+  sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }) });
   sock.ev.on('creds.update', saveCreds);
-
   sock.ev.on('connection.update', function(update) {
-    var connection = update.connection;
-    var lastDisconnect = update.lastDisconnect;
-    var qr = update.qr;
-    
-    if (qr) {
-  currentQR = qr;
-  console.log('QR ready - visit /qr to scan');
-}
+    if (update.qr) {
+      currentQR = update.qr;
+      console.log('QR ready - visit /qr to scan');
     }
-    if (connection === 'close') {
-      var shouldReconnect = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
-      console.log('Connection closed. Reconnecting:', shouldReconnect);
-      if (shouldReconnect) connectToWhatsApp();
-    } else if (connection === 'open') {
+    if (update.connection === 'close') {
+      var code = update.lastDisconnect && update.lastDisconnect.error && update.lastDisconnect.error.output && update.lastDisconnect.error.output.statusCode;
+      if (code !== DisconnectReason.loggedOut) connectToWhatsApp();
+    }
+    if (update.connection === 'open') {
+      currentQR = null;
       console.log('WhatsApp connected!');
     }
   });
 
   sock.ev.on('messages.upsert', async function(upsert) {
-    var messages = upsert.messages;
-    var msg = messages[0];
+    var msg = upsert.messages[0];
     if (!msg || !msg.message || msg.key.fromMe) return;
-
-    var isGroup = msg.key.remoteJid.endsWith('@g.us');
-    if (!isGroup) return;
+    if (!msg.key.remoteJid.endsWith('@g.us')) return;
 
     var groupId = msg.key.remoteJid;
     var text = (msg.message.conversation || (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) || '').trim();
     var textLower = text.toLowerCase();
-
     if (!text) return;
 
     var groupRecord = db.getGroup(groupId);
 
     if (textLower.startsWith('register ')) {
-      var techName = text.split(' ')[1];
-      if (TECHNICIANS[techName]) {
-        db.setGroup(groupId, techName, TECHNICIANS[techName].commission);
-        await sendMessage(groupId, 'Group registered for ' + techName + ' (' + (TECHNICIANS[techName].commission * 100) + '%)');
+      var tName = text.split(' ')[1];
+      if (TECHNICIANS[tName]) {
+        db.setGroup(groupId, tName, TECHNICIANS[tName].commission);
+        await sendMessage(groupId, 'Group registered for ' + tName + ' (' + (TECHNICIANS[tName].commission * 100) + '%)');
       }
       return;
     }
 
     if (!groupRecord) return;
-    var techName2 = groupRecord.tech_name;
-    var commission = TECHNICIANS[techName2] ? TECHNICIANS[techName2].commission : groupRecord.commission_pct;
+    var tech = groupRecord.tech_name;
+    var comm = TECHNICIANS[tech] ? TECHNICIANS[tech].commission : groupRecord.commission_pct;
 
     if (CONFIRM_KEYWORDS.some(function(kw) { return textLower === kw || textLower.startsWith(kw + ' '); })) {
-      var pendingLead = db.getLatestLeadByStatus(techName2, 'pending');
-      if (pendingLead) {
-        db.updateLead(pendingLead.id, { status: 'confirmed', confirmed_at: new Date().toISOString() });
-        cancelTimers(pendingLead.id);
-        scheduleProgressCheck(pendingLead.id, groupId, techName2);
-        await sendMessage(groupId, 'Got it ' + techName2 + '! I will check in with you in 5 minutes.');
+      var lead = db.getLatestLeadByStatus(tech, 'pending');
+      if (lead) {
+        db.updateLead(lead.id, { status: 'confirmed', confirmed_at: new Date().toISOString() });
+        cancelTimers(lead.id);
+        scheduleProgressCheck(lead.id, groupId, tech);
+        await sendMessage(groupId, 'Got it ' + tech + '! I will check in with you in 5 minutes.');
       }
       return;
     }
 
     if (textLower.startsWith(CLOSE_KEYWORD)) {
-      var calc = parseCloseMessage(textLower, commission);
-      var activeLead = db.getLatestLeadByStatus(techName2, 'confirmed', 'in_progress', 'scheduled');
-      if (activeLead) {
-        cancelTimers(activeLead.id);
-        db.updateLead(activeLead.id, {
-          status: 'closed', closed_at: new Date().toISOString(),
-          sale_amount: calc.totalSale, cash_collected: calc.cashCollected,
-          parts_tech: calc.partsCostTech, parts_company: calc.partsCostCompany
-        });
-        var summary = formatCloseMessage(techName2, commission, calc);
-        await sendMessage(groupId, summary);
-        await alertBoss('JOB CLOSED - ' + techName2 + '\n' + summary);
+      var calc = parseCloseMessage(textLower, comm);
+      var aLead = db.getLatestLeadByStatus(tech, 'confirmed', 'in_progress', 'scheduled');
+      if (aLead) {
+        cancelTimers(aLead.id);
+        db.updateLead(aLead.id, { status: 'closed', closed_at: new Date().toISOString(), sale_amount: calc.totalSale, cash_collected: calc.cashCollected, parts_tech: calc.partsCostTech, parts_company: calc.partsCostCompany });
+        var sum = formatCloseMessage(tech, comm, calc);
+        await sendMessage(groupId, sum);
+        await alertBoss('JOB CLOSED - ' + tech + '\n' + sum);
       }
       return;
     }
 
-    var confirmedLead = db.getLatestLeadByStatus(techName2, 'confirmed');
-    if (confirmedLead && confirmedLead.progress_asked) {
+    var cLead = db.getLatestLeadByStatus(tech, 'confirmed');
+    if (cLead && cLead.progress_asked) {
       if (textLower === 'yes' || textLower.includes('in progress') || textLower === 'omw') {
-        db.updateLead(confirmedLead.id, { status: 'in_progress' });
-        scheduleClosingReminder(confirmedLead.id, groupId, techName2);
+        db.updateLead(cLead.id, { status: 'in_progress' });
+        scheduleClosingReminder(cLead.id, groupId, tech);
         await sendMessage(groupId, 'Great! I will remind you to close the job in 2 hours.');
         return;
       }
-      var timeMatch = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
-      if (textLower.includes('schedule') || timeMatch) {
-        if (timeMatch) {
-          scheduleAppointmentReminders(confirmedLead.id, groupId, techName2, timeMatch[1]);
-          db.updateLead(confirmedLead.id, { status: 'scheduled', scheduled_time: timeMatch[1] });
-          await sendMessage(groupId, 'Job scheduled for ' + timeMatch[1] + '. I will remind you 1 hour before!');
-          await alertBoss('SCHEDULED - ' + techName2 + ' at ' + timeMatch[1]);
-          return;
-        }
+      var tm = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
+      if ((textLower.includes('schedule') || tm) && tm) {
+        scheduleAppointmentReminders(cLead.id, groupId, tech, tm[1]);
+        db.updateLead(cLead.id, { status: 'scheduled', scheduled_time: tm[1] });
+        await sendMessage(groupId, 'Job scheduled for ' + tm[1] + '. Reminder 1 hour before!');
+        await alertBoss('SCHEDULED - ' + tech + ' at ' + tm[1]);
+        return;
       }
       if (textLower.includes('cancel')) {
-        db.updateLead(confirmedLead.id, { status: 'cancelled' });
+        db.updateLead(cLead.id, { status: 'cancelled' });
         await sendMessage(groupId, 'Job cancelled.');
-        await alertBoss('CANCELLED - ' + techName2);
+        await alertBoss('CANCELLED - ' + tech);
         return;
       }
       if (textLower.includes('no answer')) {
-        db.updateLead(confirmedLead.id, { status: 'no_answer' });
+        db.updateLead(cLead.id, { status: 'no_answer' });
         await sendMessage(groupId, 'Customer not answering. Boss alerted.');
-        await alertBoss('NO ANSWER - ' + techName2);
+        await alertBoss('NO ANSWER - ' + tech);
         return;
       }
     }
 
     if (textLower.startsWith('reschedule')) {
-      var scheduledLead = db.getLatestLeadByStatus(techName2, 'scheduled');
-      if (scheduledLead) {
-        var timeMatch2 = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
-        if (timeMatch2) {
-          scheduleAppointmentReminders(scheduledLead.id, groupId, techName2, timeMatch2[1]);
-          db.updateLead(scheduledLead.id, { scheduled_time: timeMatch2[1] });
-          await sendMessage(groupId, 'Rescheduled to ' + timeMatch2[1] + '!');
-          await alertBoss('RESCHEDULED - ' + techName2 + ' to ' + timeMatch2[1]);
+      var sLead = db.getLatestLeadByStatus(tech, 'scheduled');
+      if (sLead) {
+        var tm2 = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
+        if (tm2) {
+          scheduleAppointmentReminders(sLead.id, groupId, tech, tm2[1]);
+          db.updateLead(sLead.id, { scheduled_time: tm2[1] });
+          await sendMessage(groupId, 'Rescheduled to ' + tm2[1]);
+          await alertBoss('RESCHEDULED - ' + tech + ' to ' + tm2[1]);
         }
       }
       return;
     }
 
     if (text.length > 10 && !textLower.startsWith('register')) {
-      var leadId = db.createLead(groupId, techName2, text);
-      console.log('New lead #' + leadId + ' for ' + techName2);
-      scheduleLeadFollowups(leadId, groupId, techName2);
+      var lid = db.createLead(groupId, tech, text);
+      console.log('New lead #' + lid + ' for ' + tech);
+      scheduleLeadFollowups(lid, groupId, tech);
     }
   });
 }
 
 cron.schedule('0 23 * * *', async function() {
-  var bossPhone = process.env.BOSS_PHONE;
-  if (!bossPhone || !sock) return;
+  if (!process.env.BOSS_PHONE || !sock) return;
   var report = await generateDailyReport();
-  await sendMessage(bossPhone + '@s.whatsapp.net', report);
+  await sendMessage(process.env.BOSS_PHONE + '@s.whatsapp.net', report);
 }, { timezone: 'America/New_York' });
 
 connectToWhatsApp();
