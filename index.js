@@ -161,4 +161,8 @@ cron.schedule('0 23 * * *', async () => {
 }, { timezone: 'America/New_York' });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 LeadTracker Pro running on port ${PORT}`));
+try {
+  app.listen(PORT, () => console.log(`🚀 LeadTracker Pro running on port ${PORT}`));
+} catch(err) {
+  console.error('STARTUP ERROR:', err);
+}
