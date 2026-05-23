@@ -13,14 +13,10 @@ async function generateDailyReport() {
   let hasData = false;
 
   for (const [techName, techInfo] of Object.entries(TECHNICIANS)) {
-    const leads = db.prepare(`
-      SELECT * FROM leads WHERE tech_name = ? AND date(created_at) = ?
-    `).all(techName, today);
-
+    const leads = db.getLeadsByTechAndDate(techName, today);
     if (leads.length === 0) continue;
     hasData = true;
 
-    const totalLeads = leads.length;
     const closedLeads = leads.filter(l => l.status === 'closed');
     const cancelledLeads = leads.filter(l => l.status === 'cancelled' || l.status === 'no_answer');
     
@@ -31,48 +27,33 @@ async function generateDailyReport() {
     const totalParts = totalPartsTech + totalPartsCompany;
     const netJobValue = totalSales - totalParts;
     const techEarns = netJobValue * techInfo.commission;
-    const techTotal = techEarns + totalPartsTech; // add back parts tech paid
+    const techTotal = techEarns + totalPartsTech;
     const balance = techTotal - totalCash;
 
     grandTotalSales += totalSales;
     grandTotalParts += totalParts;
 
-    let balanceText = '';
-    if (balance > 0) {
-      balanceText = `Company owes ${techName}: $${balance.toFixed(2)} 💸`;
-    } else if (balance < 0) {
-      balanceText = `${techName} owes company: $${Math.abs(balance).toFixed(2)} ⚠️`;
-    } else {
-      balanceText = `All settled ✅`;
-    }
+    const balanceText = balance > 0 
+      ? `Company owes ${techName}: $${balance.toFixed(2)} 💸`
+      : balance < 0 
+        ? `${techName} owes company: $${Math.abs(balance).toFixed(2)} ⚠️`
+        : `All settled ✅`;
 
     fullReport += `👤 ${techName} (${techInfo.commission * 100}%)\n`;
-    fullReport += `   Leads: ${totalLeads} | Closed: ${closedLeads.length}`;
+    fullReport += `   Leads: ${leads.length} | Closed: ${closedLeads.length}`;
     if (cancelledLeads.length > 0) fullReport += ` | Cancelled: ${cancelledLeads.length}`;
-    fullReport += `\n`;
-    fullReport += `   Total Sales: $${totalSales.toFixed(2)}\n`;
-    if (totalParts > 0) {
-      fullReport += `   Parts (tech): $${totalPartsTech.toFixed(2)} | Parts (company): $${totalPartsCompany.toFixed(2)}\n`;
-      fullReport += `   Net Job Value: $${netJobValue.toFixed(2)}\n`;
-    }
-    fullReport += `   Tech Earns: $${techEarns.toFixed(2)}`;
-    if (totalPartsTech > 0) fullReport += ` + $${totalPartsTech.toFixed(2)} parts = $${techTotal.toFixed(2)}`;
-    fullReport += `\n`;
-    fullReport += `   Cash Collected: $${totalCash.toFixed(2)}\n`;
+    fullReport += `\n   Total Sales: $${totalSales.toFixed(2)}\n`;
+    if (totalParts > 0) fullReport += `   Parts (tech): $${totalPartsTech.toFixed(2)} | Parts (co): $${totalPartsCompany.toFixed(2)}\n`;
+    fullReport += `   Tech Earns: $${techTotal.toFixed(2)} | Cash: $${totalCash.toFixed(2)}\n`;
     fullReport += `   ${balanceText}\n\n`;
   }
 
-  if (!hasData) {
-    fullReport += `No activity today.\n`;
-  }
-
-  fullReport += `${'='.repeat(35)}\n`;
-  fullReport += `💰 TOTAL SALES: $${grandTotalSales.toFixed(2)}\n`;
-  if (grandTotalParts > 0) fullReport += `🔧 TOTAL PARTS: $${grandTotalParts.toFixed(2)}\n`;
-  fullReport += `📦 NET REVENUE: $${(grandTotalSales - grandTotalParts).toFixed(2)}`;
+  if (!hasData) fullReport += `No activity today.\n`;
+  fullReport += `${'='.repeat(35)}\n💰 TOTAL SALES: $${grandTotalSales.toFixed(2)}`;
+  if (grandTotalParts > 0) fullReport += `\n🔧 TOTAL PARTS: $${grandTotalParts.toFixed(2)}`;
 
   await alertBoss(fullReport);
-  console.log('📊 Daily report sent to boss');
+  console.log('📊 Daily report sent');
 }
 
 module.exports = { generateDailyReport };
