@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config();console.log('ENV CHECK:', !!process.env.WHATSAPP_TOKEN, !!process.env.WEBHOOK_VERIFY_TOKEN);
 process.on('uncaughtException', (err) => {
   console.error('CRASH:', err);
 });
