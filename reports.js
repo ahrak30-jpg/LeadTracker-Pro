@@ -1,5 +1,4 @@
 const db = require('./db');
-const { alertBoss } = require('./whatsapp');
 const { TECHNICIANS } = require('./config');
 
 async function generateDailyReport() {
@@ -19,7 +18,6 @@ async function generateDailyReport() {
 
     const closedLeads = leads.filter(l => l.status === 'closed');
     const cancelledLeads = leads.filter(l => l.status === 'cancelled' || l.status === 'no_answer');
-    
     const totalSales = closedLeads.reduce((sum, l) => sum + (l.sale_amount || 0), 0);
     const totalCash = closedLeads.reduce((sum, l) => sum + (l.cash_collected || 0), 0);
     const totalPartsTech = closedLeads.reduce((sum, l) => sum + (l.parts_tech || 0), 0);
@@ -42,18 +40,14 @@ async function generateDailyReport() {
     fullReport += `👤 ${techName} (${techInfo.commission * 100}%)\n`;
     fullReport += `   Leads: ${leads.length} | Closed: ${closedLeads.length}`;
     if (cancelledLeads.length > 0) fullReport += ` | Cancelled: ${cancelledLeads.length}`;
-    fullReport += `\n   Total Sales: $${totalSales.toFixed(2)}\n`;
-    if (totalParts > 0) fullReport += `   Parts (tech): $${totalPartsTech.toFixed(2)} | Parts (co): $${totalPartsCompany.toFixed(2)}\n`;
-    fullReport += `   Tech Earns: $${techTotal.toFixed(2)} | Cash: $${totalCash.toFixed(2)}\n`;
+    fullReport += `\n   Sales: $${totalSales.toFixed(2)} | Earns: $${techTotal.toFixed(2)} | Cash: $${totalCash.toFixed(2)}\n`;
     fullReport += `   ${balanceText}\n\n`;
   }
 
   if (!hasData) fullReport += `No activity today.\n`;
   fullReport += `${'='.repeat(35)}\n💰 TOTAL SALES: $${grandTotalSales.toFixed(2)}`;
-  if (grandTotalParts > 0) fullReport += `\n🔧 TOTAL PARTS: $${grandTotalParts.toFixed(2)}`;
 
-  await alertBoss(fullReport);
-  console.log('📊 Daily report sent');
+  return fullReport;
 }
 
 module.exports = { generateDailyReport };
