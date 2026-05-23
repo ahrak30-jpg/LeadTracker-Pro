@@ -7,18 +7,11 @@ const { TECHNICIANS, CONFIRM_KEYWORDS, CLOSE_KEYWORD } = require('./config');
 const { generateDailyReport } = require('./reports');
 const { updateTechLocation, getClosestTechs } = require('./location');
 const { parseCloseMessage, formatCloseMessage } = require('./parts');
-const { 
-  scheduleLeadFollowups, 
-  scheduleProgressCheck, 
-  scheduleClosingReminder,
-  scheduleAppointmentReminders,
-  cancelTimers
-} = require('./scheduler');
+const { scheduleLeadFollowups, scheduleProgressCheck, scheduleClosingReminder, scheduleAppointmentReminders, cancelTimers } = require('./scheduler');
 
 const app = express();
 app.use(express.json());
 
-// ─── WEBHOOK VERIFICATION ────────────────────────────────────────────────────
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -31,10 +24,8 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// ─── INCOMING MESSAGES ───────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
-
   try {
     const entry = req.body.entry?.[0];
     const value = entry?.changes?.[0]?.value;
@@ -45,29 +36,22 @@ app.post('/webhook', async (req, res) => {
     const from = msg.from;
     const msgType = msg.type;
 
-    const groupRecord = db.prepare('SELECT * FROM groups WHERE group_id = ?').get(from);
+    const groupRecord = db.getGroup(from);
 
-    // ── LOCATION MESSAGE ──────────────────────────────────────────────────────
     if (msgType === 'location') {
       const { latitude, longitude } = msg.location;
-      if (groupRecord) {
-        updateTechLocation(groupRecord.tech_name, latitude, longitude);
-      }
+      if (groupRecord) updateTechLocation(groupRecord.tech_name, latitude, longitude);
       return;
     }
 
     const text = msg.text?.body?.trim() || '';
     const textLower = text.toLowerCase();
 
-    // ── SETUP: Register group ─────────────────────────────────────────────────
     if (textLower.startsWith('register ')) {
       const techName = text.split(' ')[1];
       if (TECHNICIANS[techName]) {
-        db.prepare(`
-          INSERT OR REPLACE INTO groups (group_id, tech_name, commission_pct)
-          VALUES (?, ?, ?)
-        `).run(from, techName, TECHNICIANS[techName].commission);
-        await sendMessage(from, `✅ Group registered for ${techName} (${TECHNICIANS[techName].commission * 100}%)\n\nI will now track all leads in this group.`);
+        db.setGroup(from, techName, TECHNICIANS[techName].commission);
+        await sendMessage(from, `✅ Group registered for ${techName} (${TECHNICIANS[techName].commission * 100}%)`);
       }
       return;
     }
@@ -76,15 +60,10 @@ app.post('/webhook', async (req, res) => {
     const techName = groupRecord.tech_name;
     const commission = TECHNICIANS[techName]?.commission || groupRecord.commission_pct;
 
-    // ── CONFIRMATION (k, ok, done, etc.) ─────────────────────────────────────
     if (CONFIRM_KEYWORDS.some(kw => textLower === kw || textLower.startsWith(kw + ' '))) {
-      const pendingLead = db.prepare(`
-        SELECT * FROM leads WHERE tech_name = ? AND status = 'pending'
-        ORDER BY created_at DESC LIMIT 1
-      `).get(techName);
-
+      const pendingLead = db.getLatestLeadByStatus(techName, 'pending');
       if (pendingLead) {
-        db.prepare(`UPDATE leads SET status = 'confirmed', confirmed_at = CURRENT_TIMESTAMP WHERE id = ?`).run(pendingLead.id);
+        db.updateLead(pendingLead.id, { status: 'confirmed', confirmed_at: new Date().toISOString() });
         cancelTimers(pendingLead.id);
         scheduleProgressCheck(pendingLead.id, from, techName);
         await sendMessage(from, `✅ Got it ${techName}! I'll check in with you in 5 minutes.`);
@@ -92,24 +71,16 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── JOB CLOSE ────────────────────────────────────────────────────────────
-    // Format: "closed 105 50cash 5parts-tech 10parts-company"
     if (textLower.startsWith(CLOSE_KEYWORD)) {
       const calc = parseCloseMessage(textLower, commission);
-
-      const activeLead = db.prepare(`
-        SELECT * FROM leads WHERE tech_name = ? AND status IN ('confirmed','in_progress','scheduled')
-        ORDER BY created_at DESC LIMIT 1
-      `).get(techName);
-
+      const activeLead = db.getLatestLeadByStatus(techName, 'confirmed', 'in_progress', 'scheduled');
       if (activeLead) {
         cancelTimers(activeLead.id);
-        db.prepare(`
-          UPDATE leads SET status = 'closed', closed_at = CURRENT_TIMESTAMP, 
-          sale_amount = ?, cash_collected = ?, parts_tech = ?, parts_company = ?
-          WHERE id = ?
-        `).run(calc.totalSale, calc.cashCollected, calc.partsCostTech, calc.partsCostCompany, activeLead.id);
-
+        db.updateLead(activeLead.id, {
+          status: 'closed', closed_at: new Date().toISOString(),
+          sale_amount: calc.totalSale, cash_collected: calc.cashCollected,
+          parts_tech: calc.partsCostTech, parts_company: calc.partsCostCompany
+        });
         const summary = formatCloseMessage(techName, commission, calc);
         await sendMessage(from, summary);
         await alertBoss(`✅ JOB CLOSED - ${techName}\n${summary}`);
@@ -117,86 +88,57 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── PROGRESS RESPONSE ─────────────────────────────────────────────────────
-    const confirmedLead = db.prepare(`
-      SELECT * FROM leads WHERE tech_name = ? AND status = 'confirmed' AND progress_asked = 1
-      ORDER BY created_at DESC LIMIT 1
-    `).get(techName);
-
-    if (confirmedLead) {
-      if (textLower === 'yes' || textLower.includes('in progress') || textLower.includes('on my way') || textLower === 'omw') {
-        db.prepare(`UPDATE leads SET status = 'in_progress' WHERE id = ?`).run(confirmedLead.id);
+    const confirmedLead = db.getLatestLeadByStatus(techName, 'confirmed');
+    if (confirmedLead && confirmedLead.progress_asked) {
+      if (textLower === 'yes' || textLower.includes('in progress') || textLower === 'omw') {
+        db.updateLead(confirmedLead.id, { status: 'in_progress' });
         scheduleClosingReminder(confirmedLead.id, from, techName);
         await sendMessage(from, `💪 Great! I'll remind you to close the job in 2 hours.`);
         return;
       }
-
-      if (textLower.includes('schedule') || textLower.match(/\d+(am|pm)/i)) {
-        const timeMatch = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i) || text.match(/(\d{1,2}:\d{2})/);
+      const timeMatch = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
+      if (textLower.includes('schedule') || timeMatch) {
         const timeStr = timeMatch ? timeMatch[1] : null;
         if (timeStr) {
           scheduleAppointmentReminders(confirmedLead.id, from, techName, timeStr);
-          db.prepare(`UPDATE leads SET status = 'scheduled', scheduled_time = ? WHERE id = ?`).run(timeStr, confirmedLead.id);
-          await sendMessage(from, `📅 Got it! Job scheduled for ${timeStr}.\nI'll remind you 1 hour before and follow up after.`);
-          await alertBoss(`📅 SCHEDULED - ${techName}\nJob scheduled for ${timeStr}`);
+          db.updateLead(confirmedLead.id, { status: 'scheduled', scheduled_time: timeStr });
+          await sendMessage(from, `📅 Job scheduled for ${timeStr}. I'll remind you 1 hour before!`);
+          await alertBoss(`📅 SCHEDULED - ${techName} at ${timeStr}`);
           return;
         }
       }
-
       if (textLower.includes('cancel')) {
-        db.prepare(`UPDATE leads SET status = 'cancelled', cancel_reason = 'cancelled' WHERE id = ?`).run(confirmedLead.id);
-        await sendMessage(from, `❌ Job marked as cancelled.`);
-        await alertBoss(`❌ CANCELLED - ${techName}\nJob: "${confirmedLead.message}"`);
+        db.updateLead(confirmedLead.id, { status: 'cancelled' });
+        await sendMessage(from, `❌ Job cancelled.`);
+        await alertBoss(`❌ CANCELLED - ${techName}`);
         return;
       }
-
-      if (textLower.includes('no answer') || textLower.includes('no response')) {
-        db.prepare(`UPDATE leads SET status = 'no_answer', cancel_reason = 'no answer' WHERE id = ?`).run(confirmedLead.id);
-        await sendMessage(from, `📵 Noted - customer not answering. I'll alert the boss.`);
-        await alertBoss(`📵 NO ANSWER - ${techName}\nCustomer not answering for: "${confirmedLead.message}"`);
+      if (textLower.includes('no answer')) {
+        db.updateLead(confirmedLead.id, { status: 'no_answer' });
+        await sendMessage(from, `📵 Noted - customer not answering.`);
+        await alertBoss(`📵 NO ANSWER - ${techName}`);
         return;
       }
     }
 
-    // ── RESCHEDULE ────────────────────────────────────────────────────────────
     if (textLower.startsWith('reschedule')) {
-      const scheduledLead = db.prepare(`
-        SELECT * FROM leads WHERE tech_name = ? AND status = 'scheduled'
-        ORDER BY created_at DESC LIMIT 1
-      `).get(techName);
-
+      const scheduledLead = db.getLatestLeadByStatus(techName, 'scheduled');
       if (scheduledLead) {
         const timeMatch = text.match(/(\d{1,2}:?\d{0,2}\s*(?:am|pm|AM|PM))/i);
         if (timeMatch) {
-          const newTime = timeMatch[1];
-          scheduleAppointmentReminders(scheduledLead.id, from, techName, newTime);
-          db.prepare(`UPDATE leads SET scheduled_time = ? WHERE id = ?`).run(newTime, scheduledLead.id);
-          await sendMessage(from, `📅 Rescheduled to ${newTime}! Reminders updated.`);
-          await alertBoss(`🔄 RESCHEDULED - ${techName}\nNew time: ${newTime}`);
+          scheduleAppointmentReminders(scheduledLead.id, from, techName, timeMatch[1]);
+          db.updateLead(scheduledLead.id, { scheduled_time: timeMatch[1] });
+          await sendMessage(from, `📅 Rescheduled to ${timeMatch[1]}!`);
+          await alertBoss(`🔄 RESCHEDULED - ${techName} to ${timeMatch[1]}`);
         }
       }
       return;
     }
 
-    // ── NEW LEAD ──────────────────────────────────────────────────────────────
     if (text.length > 10 && !textLower.startsWith('register')) {
-      const lead = db.prepare(`
-        INSERT INTO leads (group_id, tech_name, message, status)
-        VALUES (?, ?, ?, 'pending')
-      `).run(from, techName, text);
-
-      const leadId = lead.lastInsertRowid;
+      const leadId = db.createLead(from, techName, text);
       console.log(`📋 New lead #${leadId} for ${techName}`);
       scheduleLeadFollowups(leadId, from, techName);
-
-      // If lead has location, find closest techs for boss
-      if (msg.location) {
-        const closest = getClosestTechs(msg.location.latitude, msg.location.longitude, techName);
-        if (closest.length > 0) {
-          const options = closest.map((t, i) => `${i+1}. ${t.techName} - ${t.distance.toFixed(1)} miles`).join('\n');
-          await alertBoss(`📋 NEW LEAD - ${techName}'s group\n\n"${text}"\n\n🗺️ Closest techs:\n${options}`);
-        }
-      }
     }
 
   } catch (err) {
@@ -204,7 +146,6 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ─── MANUAL REPORT ────────────────────────────────────────────────────────────
 app.get('/report', async (req, res) => {
   await generateDailyReport();
   res.send('Report sent ✅');
@@ -212,9 +153,7 @@ app.get('/report', async (req, res) => {
 
 app.get('/', (req, res) => res.send('LeadTracker Pro is running ✅'));
 
-// ─── DAILY REPORT AT 11PM ET ──────────────────────────────────────────────────
 cron.schedule('0 23 * * *', async () => {
-  console.log('📊 Generating daily report...');
   await generateDailyReport();
 }, { timezone: 'America/New_York' });
 
