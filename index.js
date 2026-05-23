@@ -1,4 +1,7 @@
 require('dotenv').config();
+process.on('uncaughtException', (err) => {
+  console.error('CRASH:', err);
+});
 const express = require('express');
 const cron = require('node-cron');
 const db = require('./db');
