@@ -11,7 +11,15 @@ const { scheduleLeadFollowups, scheduleProgressCheck, scheduleClosingReminder, s
 const { generateDailyReport } = require('./reports');
 
 const app = express();
+let currentQR = null;
 app.get('/', (req, res) => res.send('LeadTracker Pro is running'));
+app.get('/qr', (req, res) => {
+  if (currentQR) {
+    res.send('<html><body><h2>Scan this QR with WhatsApp Business</h2><img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(currentQR) + '"/></body></html>');
+  } else {
+    res.send('No QR code available yet. Refresh in a few seconds.');
+  }
+});
 app.get('/report', async (req, res) => {
   const report = await generateDailyReport();
   res.send(report);
@@ -51,9 +59,9 @@ async function connectToWhatsApp() {
     var qr = update.qr;
     
     if (qr) {
-      console.log('QR CODE - Scan with WhatsApp Business:');
-      qrcode.generate(qr, { small: true });
-      console.log('QR STRING: ' + qr);
+  currentQR = qr;
+  console.log('QR ready - visit /qr to scan');
+}
     }
     if (connection === 'close') {
       var shouldReconnect = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
