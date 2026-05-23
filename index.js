@@ -162,7 +162,17 @@ cron.schedule('0 23 * * *', async () => {
 
 const PORT = process.env.PORT || 3000;
 try {
-  app.listen(PORT, () => console.log(`🚀 LeadTracker Pro running on port ${PORT}`));
+const server = app.listen(PORT, () => {
+  console.log(`🚀 LeadTracker Pro running on port ${PORT}`);
+  // Keep alive ping every 10 seconds
+  setInterval(() => {
+    console.log('💓 Server alive');
+  }, 10000);
+});
+
+server.on('error', (err) => {
+  console.error('SERVER ERROR:', err);
+});
 } catch(err) {
   console.error('STARTUP ERROR:', err);
 }
